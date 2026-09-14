@@ -1,2 +1,1 @@
-# 无第三方依赖，仅使用 Python 标准库
-# Render 需要 requirements.txt 存在才能识别为 Python 项目
+openpyxl>=3.1.0
