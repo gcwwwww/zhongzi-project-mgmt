@@ -974,14 +974,30 @@
   /* ---- 人员台账 ---- */
   VIEWS.personnel = function () {
     var root = h("div");
+    var selectedIds = {};
+    var tb = h("tbody");
+    var batchBar = h("div", { class: "toolbar", style: "display:none" });
     root.appendChild(h("div", { class: "toolbar" }, [
       h("div", { class: "left" }, h("div", { class: "section-title" }, "研发人员台账（" + Store.data.personnel.length + " 人）")),
       h("div", { class: "right" }, [
         h("button", { class: "btn", onclick: downloadPersonnelTemplate }, "下载导入模板"),
         h("button", { class: "btn", onclick: function () { triggerUpload(importPersonnel, ".xls,.xlsx"); } }, "上传Excel导入"),
+        h("button", { class: "btn", onclick: function () { toggleBatchSelect(root, selectedIds, batchBar, tb); } }, "批量选取"),
         h("button", { class: "btn btn-primary", onclick: function () { editPerson(null, null); } }, "+ 添加人员")
       ])
     ]));
+    // 批量操作工具栏
+    batchBar.appendChild(h("div", { class: "left" }, [
+      h("span", { class: "section-title", id: "batch-count" }, "已选 0 人")
+    ]));
+    batchBar.appendChild(h("div", { class: "right" }, [
+      h("button", { class: "btn btn-sm", onclick: function () { selectAllRows(selectedIds, tb); } }, "全选"),
+      h("button", { class: "btn btn-sm", onclick: function () { clearSelection(selectedIds, tb, batchBar); } }, "取消选择"),
+      h("button", { class: "btn btn-sm btn-primary", onclick: function () { batchAssignProject(selectedIds); } }, "批量分配项目"),
+      h("button", { class: "btn btn-sm btn-danger", onclick: function () { batchDeletePersons(selectedIds, batchBar, tb); } }, "批量删除"),
+      h("button", { class: "btn btn-sm", onclick: function () { exitBatchMode(root, selectedIds, batchBar, tb); } }, "退出批量模式")
+    ]));
+    root.appendChild(batchBar);
     // 检查一人关联多项目的情况
     var conflicts = findPersonProjectConflicts();
     if (conflicts.length) {
@@ -1000,11 +1016,11 @@
     }
     var wrap = h("div", { class: "table-wrap" });
     var tbl = h("table", { class: "tbl" });
-    tbl.innerHTML = "<thead><tr><th>序号</th><th>姓名</th><th>职责分工</th><th>所属项目</th><th class='num'>本月研发工时</th><th class='num'>本月总工时</th><th>操作</th></tr></thead>";
-    var tb = h("tbody");
+    tbl.innerHTML = "<thead><tr><th class='batch-col' style='display:none'>选</th><th>序号</th><th>姓名</th><th>职责分工</th><th>所属项目</th><th class='num'>本月研发工时</th><th class='num'>本月总工时</th><th>操作</th></tr></thead>";
     var m = Store.data.settings.currentMonth;
     Store.data.personnel.forEach(function (pe, i) {
-      tb.appendChild(h("tr", {}, [
+      var tr = h("tr", {}, [
+        h("td", { class: "batch-col", style: "display:none" }, h("input", { type: "checkbox", "data-id": pe.id, onchange: function (e) { onRowSelect(e, selectedIds, batchBar); } })),
         h("td", {}, String(i + 1)),
         h("td", {}, pe.name),
         h("td", { class: "wrap" }, pe.responsibility || "—"),
@@ -1016,11 +1032,83 @@
           h("button", { class: "btn btn-sm", onclick: function () { Router.params.pid = pe.projectId; Router.go("attendance", Router.params); } }, "考勤"),
           h("button", { class: "btn btn-sm btn-danger", onclick: function () { delPerson(pe.id); } }, "删除")
         ])
-      ]));
+      ]);
+      tb.appendChild(tr);
     });
     tbl.appendChild(tb); wrap.appendChild(tbl); root.appendChild(wrap);
     return root;
   };
+  // 批量选取相关辅助函数
+  function toggleBatchSelect(root, selectedIds, batchBar, tb) {
+    batchBar.style.display = "flex";
+    var cols = root.querySelectorAll(".batch-col");
+    cols.forEach(function (c) { c.style.display = ""; });
+    toast("已进入批量选取模式，勾选人员后可批量操作", "ok");
+  }
+  function exitBatchMode(root, selectedIds, batchBar, tb) {
+    batchBar.style.display = "none";
+    var cols = root.querySelectorAll(".batch-col");
+    cols.forEach(function (c) { c.style.display = "none"; });
+    Object.keys(selectedIds).forEach(function (k) { delete selectedIds[k]; });
+    var boxes = tb.querySelectorAll("input[type=checkbox]");
+    boxes.forEach(function (b) { b.checked = false; });
+    Router.go(Router.view, Router.params);
+  }
+  function onRowSelect(e, selectedIds, batchBar) {
+    var id = e.target.getAttribute("data-id");
+    if (e.target.checked) selectedIds[id] = true;
+    else delete selectedIds[id];
+    var cnt = Object.keys(selectedIds).length;
+    var lbl = el("batch-count");
+    if (lbl) lbl.textContent = "已选 " + cnt + " 人";
+  }
+  function selectAllRows(selectedIds, tb) {
+    var boxes = tb.querySelectorAll("input[type=checkbox]");
+    boxes.forEach(function (b) { b.checked = true; b.dispatchEvent(new Event("change")); });
+  }
+  function clearSelection(selectedIds, tb, batchBar) {
+    Object.keys(selectedIds).forEach(function (k) { delete selectedIds[k]; });
+    var boxes = tb.querySelectorAll("input[type=checkbox]");
+    boxes.forEach(function (b) { b.checked = false; });
+    var lbl = el("batch-count");
+    if (lbl) lbl.textContent = "已选 0 人";
+  }
+  function batchDeletePersons(selectedIds, batchBar, tb) {
+    var ids = Object.keys(selectedIds);
+    if (!ids.length) { toast("请先勾选要删除的人员", "err"); return; }
+    var names = ids.map(function (id) { var p = personById(id); return p ? p.name : ""; }).filter(Boolean);
+    confirmModal("批量删除", "确认删除以下 " + ids.length + " 名人员？删除后考勤记录一并清除：\n\n" + names.join("、"), function () {
+      var idSet = {}; ids.forEach(function (id) { idSet[id] = true; });
+      Store.data.personnel = Store.data.personnel.filter(function (p) { return !idSet[p.id]; });
+      Store.save();
+      toast("已删除 " + ids.length + " 名人员", "ok");
+      exitBatchMode(document, selectedIds, batchBar, tb);
+      Router.go(Router.view, Router.params);
+    });
+  }
+  function batchAssignProject(selectedIds) {
+    var ids = Object.keys(selectedIds);
+    if (!ids.length) { toast("请先勾选要分配项目的人员", "err"); return; }
+    var form = h("div", { class: "form-grid" });
+    var cnt = h("div", { class: "text-muted", style: "margin-bottom:8px" }, "为 " + ids.length + " 名人员批量分配项目：");
+    var sel = h("select", { id: "batch_proj", style: "width:100%" });
+    sel.appendChild(h("option", { value: "" }, "未分配"));
+    Store.data.projects.forEach(function (p) { sel.appendChild(h("option", { value: p.id }, p.name)); });
+    form.appendChild(cnt);
+    form.appendChild(field("所属项目", sel));
+    openModal("批量分配项目", form, { foot: [
+      { text: "取消", onclick: closeModal },
+      { text: "确认分配", kind: "btn-primary", onclick: function () {
+        var newPid = el("batch_proj").value || null;
+        var cnt2 = 0;
+        ids.forEach(function (id) { var p = personById(id); if (p) { p.projectId = newPid; cnt2++; } });
+        Store.save();
+        closeModal();
+        Router.go(Router.view, Router.params);
+        toast("已为 " + cnt2 + " 人分配" + (newPid ? "到「" + (projectById(newPid) ? projectById(newPid).name : "") + "」" : "为未分配"), "ok");
+      } }
+    ] });
+  }
   function editPerson(id, fixedPid) {
     var pe = id ? personById(id) : { name: "", responsibility: "", projectId: fixedPid || null };
     var form = h("div", { class: "form-grid" });
@@ -1288,69 +1376,15 @@
   }
 
   function exportAttendance(m, pid) {
-    var dates = attDates(m);
-    var n = dates.length;
-    var list = Store.data.personnel.filter(function (pe) { return pid === "all" || pe.projectId === pid; });
-    // 标题行
-    var projName = pid && pid !== "all" && projectById(pid) ? projectById(pid).name : "全部项目";
-    var titleRow1 = ["中咨养护检测 - 研发人员考勤明细表"];
-    var titleRow2 = ["项目名称：" + projName + "    考勤月份：" + attLabel(m) + "    周期：" + attCycleStr(m) + "    单位：天"];
-    // 表头：序号 姓名 职责分工 研发课题名称 | 研发人员研发工时 研发人员总工时 | 每日(研发/非研发)
-    var head1 = ["序号", "姓名", "职责分工", "研发课题名称", "研发人员研发工时（天）", "研发人员总工时（天）"];
-    for (var d = 0; d < n; d++) head1.push(dates[d].month + "/" + dates[d].day, "");
-    var head2 = ["", "", "", "", "", ""];
-    for (var d2 = 0; d2 < n; d2++) head2.push("周" + WEEK[dates[d2].weekday], "");
-    var head3 = ["", "", "", "", "", ""];
-    for (var d3 = 0; d3 < n; d3++) head3.push("研发", "非研发");
-    var rows = [titleRow1, titleRow2, head1, head2, head3];
-    var headerRows = 5; // 前5行是标题+表头
-    list.forEach(function (pe, idx) {
-      var att = ensureAtt(pe, m);
-      var row = [idx + 1, pe.name, pe.responsibility, pe.projectId ? projectById(pe.projectId).name : ""];
-      var rdS = 0, totS = 0;
-      for (var d = 1; d <= n; d++) { var pr = dayPair(att, d); row.push(pr.rd, pr.nonRd); rdS += Number(pr.rd) || 0; totS += (Number(pr.rd) || 0) + (Number(pr.nonRd) || 0); }
-      // 插入累计列到第5、6位置
-      var fullRow = [row[0], row[1], row[2], row[3], fmt(rdS, 1), fmt(totS, 1)];
-      for (var i = 6; i < row.length; i++) fullRow.push(row[i]);
-      rows.push(fullRow);
-    });
-    // 合计行
-    var sum = ["合计", "", "", "", fmt(list.reduce(function (s, pe) { return s + sumRd(pe, m); }, 0), 1), fmt(list.reduce(function (s, pe) { return s + sumTotal(pe, m); }, 0), 1)];
-    for (var d = 1; d <= n; d++) { var sR = 0, sN = 0; list.forEach(function (pe) { var pr = dayPair(ensureAtt(pe, m), d); sR += Number(pr.rd) || 0; sN += Number(pr.nonRd) || 0; }); sum.push(fmt(sR, 1), fmt(sN, 1)); }
-    rows.push(sum);
-    // 空行
-    rows.push([]);
-    // 签字行：项目负责人 + 制表人
-    var sig = (Store.data.settings.signatures || {})[m + (pid && pid !== "all" ? "_" + pid : "")] || { leaderName: "", makerName: "" };
-    rows.push(["项目负责人（签字）：" + (sig.leaderName || "______"), "", "", "", "", "制表人（签字）：" + (sig.makerName || "______")]);
-    rows.push(["日期：" + attCycleStr(m).split(" ~ ")[1] + " 或 _____", "", "", "", "", "日期：_____"]);
-    var ws = XLSX.utils.aoa_to_sheet(rows);
-    // 设置列宽
-    ws["!cols"] = [{ wch: 6 }, { wch: 10 }, { wch: 16 }, { wch: 24 }, { wch: 14 }, { wch: 14 }];
-    for (var d = 0; d < n; d++) ws["!cols"].push({ wch: 7 }, { wch: 7 });
-    // 合并单元格
-    var merges = [];
-    // 标题行1：合并所有列
-    merges.push({ s: { r: 0, c: 0 }, e: { r: 0, c: 5 + n * 2 - 1 } });
-    // 标题行2：合并所有列
-    merges.push({ s: { r: 1, c: 0 }, e: { r: 1, c: 5 + n * 2 - 1 } });
-    // 表头前6列纵向合并3行
-    for (var c = 0; c < 6; c++) merges.push({ s: { r: 2, c: c }, e: { r: 4, c: c } });
-    // 每日日期列：第0行合并2列2行
-    for (var d = 1; d <= n; d++) {
-      var base = 5 + (d - 1) * 2;
-      merges.push({ s: { r: 2, c: base }, e: { r: 3, c: base + 1 } }); // 日期+周合并
-    }
-    // 签字行合并
-    var lastRowIdx = rows.length - 1;
-    var sigRowIdx = rows.length - 2;
-    merges.push({ s: { r: sigRowIdx, c: 0 }, e: { r: lastRowIdx, c: 3 } });
-    merges.push({ s: { r: sigRowIdx, c: 5 }, e: { r: lastRowIdx, c: 5 + n * 2 - 6 } });
-    ws["!merges"] = merges;
-    var wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, attLabel(m));
-    download("研发人员考勤表-" + attLabel(m) + "（周期" + attCycleStr(m) + "）.xlsx", wb);
-    toast("已导出考勤表", "ok");
+    // 调用后端接口生成带完整样式的 Excel（字体、边框、合并单元格按模板格式）
+    var url = "/api/export/attendance?month=" + encodeURIComponent(m) + "&pid=" + encodeURIComponent(pid || "all");
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = "研发人员考勤表-" + m + ".xlsx";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    toast("已导出考勤表（按模板格式）", "ok");
   }
 
   function exportReport(m) { exportMonthly(m); }
