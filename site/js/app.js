@@ -614,12 +614,12 @@
     });
     // 合计行
     var tfoot = h("tfoot");
-    var ftr = h("tr", {}, [h("td", { colspan: 5, class: "left sum-cell" }, "合计"), h("td", { class: "sum-cell" }, fmt(list.reduce(function (s, pe) { return s + sumRd(pe, m); }, 0), 1)), h("td", { class: "sum-cell" }, fmt(list.reduce(function (s, pe) { return s + sumTotal(pe, m); }, 0), 1))]);
+    var ftr = h("tr", {}, [h("td", { colspan: 5, class: "left sum-cell" }, "合计"), h("td", { class: "sum-cell", id: "foot_rd" }, fmt(list.reduce(function (s, pe) { return s + sumRd(pe, m); }, 0), 1)), h("td", { class: "sum-cell", id: "foot_tt" }, fmt(list.reduce(function (s, pe) { return s + sumTotal(pe, m); }, 0), 1))]);
     for (var d = 1; d <= n; d++) {
       var sR = 0, sN = 0;
       list.forEach(function (pe) { var pr = dayPair(ensureAtt(pe, m), d); sR += Number(pr.rd) || 0; sN += Number(pr.nonRd) || 0; });
-      ftr.appendChild(h("td", { class: "sum-cell rd" }, fmt(sR, 1)));
-      ftr.appendChild(h("td", { class: "sum-cell nrd" }, fmt(sN, 1)));
+      ftr.appendChild(h("td", { class: "sum-cell rd", id: "foot_rd_" + d }, fmt(sR, 1)));
+      ftr.appendChild(h("td", { class: "sum-cell nrd", id: "foot_nrd_" + d }, fmt(sN, 1)));
     }
     tfoot.appendChild(ftr);
     tbl.appendChild(tb); tbl.appendChild(tfoot);
@@ -804,10 +804,19 @@
     var m = Store.data.settings.currentMonth;
     var input = h("input", { type: "number", step: "0.1", min: "0", max: "1", value: val, onchange: function (e) {
       var pe = personById(peId); var att = ensureAtt(pe, m);
-      var pair = dayPair(att, d); if (type === "rd") pair.rd = Number(e.target.value) || 0; else pair.nonRd = Number(e.target.value) || 0;
+      var v = Number(e.target.value); if (isNaN(v)) v = 0;
+      v = Math.min(1, Math.max(0, v)); v = Math.round(v * 10) / 10;
+      var pair = dayPair(att, d);
+      if (type === "rd") { pair.rd = v; pair.nonRd = Math.round((1 - v) * 10) / 10; }
+      else { pair.nonRd = v; pair.rd = Math.round((1 - v) * 10) / 10; }
       Store.save();
+      var rdTd = document.getElementById("att_rd_" + peId + "_" + d);
+      var nrdTd = document.getElementById("att_nrd_" + peId + "_" + d);
+      if (rdTd) rdTd.querySelector("input").value = pair.rd;
+      if (nrdTd) nrdTd.querySelector("input").value = pair.nonRd;
       el("rd_" + peId).textContent = fmt(sumRd(pe, m), 1);
       el("tt_" + peId).textContent = fmt(sumTotal(pe, m), 1);
+      updateAttFoot(m);
       checkAttRowOverflow(peId, d);
     } });
     if (rest) { input.placeholder = "0"; input.style.background = "#f5f5f5"; }
@@ -815,6 +824,24 @@
     td.id = "att_" + type + "_" + peId + "_" + d;
     setTimeout(function () { checkAttRowOverflow(peId, d, td); }, 0);
     return td;
+  }
+  function updateAttFoot(m) {
+    var pid = Router.params.pid || "all";
+    var list = Store.data.personnel.filter(function (pe) { return pid === "all" || pe.projectId === pid; });
+    var footRd = el("foot_rd"), footTt = el("foot_tt");
+    if (!footRd || !footTt) return;
+    var totR = 0, totT = 0;
+    list.forEach(function (pe) { totR += sumRd(pe, m); totT += sumTotal(pe, m); });
+    footRd.textContent = fmt(totR, 1);
+    footTt.textContent = fmt(totT, 1);
+    var n = attDates(m).length;
+    for (var d = 1; d <= n; d++) {
+      var sR = 0, sN = 0;
+      list.forEach(function (pe) { var pr = dayPair(ensureAtt(pe, m), d); sR += Number(pr.rd) || 0; sN += Number(pr.nonRd) || 0; });
+      var cR = el("foot_rd_" + d), cN = el("foot_nrd_" + d);
+      if (cR) cR.textContent = fmt(sR, 1);
+      if (cN) cN.textContent = fmt(sN, 1);
+    }
   }
   function checkAttRowOverflow(peId, d, forceTd) {
     var m = Store.data.settings.currentMonth;
