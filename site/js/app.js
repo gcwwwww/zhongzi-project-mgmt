@@ -128,6 +128,9 @@
         if (data && data.projects) {
           // 合并缺失字段
           if (!data.achievements) data.achievements = [];
+          if (!data.fundBudgets) data.fundBudgets = {};
+          if (!data.fundRecords) data.fundRecords = {};
+          if (!data.contacts || !data.contacts.cols) data.contacts = defaultContacts();
           if (!data.settings.signatures) data.settings.signatures = {};
           self.data = data;
           localStorage.setItem(LS_KEY, JSON.stringify(data));
@@ -175,6 +178,9 @@
         settings: { companyName: s.companyName, currentMonth: m, dailyRate: s.dailyRate || 300 },
         projects: projects,
         personnel: personnel,
+        fundBudgets: {},
+        fundRecords: {},
+        contacts: defaultContacts(),
         achievements: (s.achievements || []).map(function (a) {
           return { id: uid(), type: a.type || "研究报告", title: a.title || "", authors: a.authors || "", projectId: a.projectId || null, date: a.date || "", description: a.description || "" };
         })
@@ -182,6 +188,19 @@
     },
     reset: function () { localStorage.removeItem(LS_KEY); this.data = this.fromSeed(); this.save(); }
   };
+  function defaultContacts() {
+    return {
+      cols: ["序号","创新小组","人员工时表对接人","月度汇报对接人"],
+      rows: [
+        ["1","公路","周晶","周晶"],
+        ["2","材料","田佳磊","田佳磊"],
+        ["3","桥梁","汪辛","汪辛"],
+        ["4","隧道","高兴","高兴"],
+        ["5","交通","苟泉涛","苟泉涛"],
+        ["6","桥隧养护","张若男","张若男"]
+      ]
+    };
+  }
 
   /* ---------- 业务查询 ---------- */
   function projectById(id) { for (var i = 0; i < Store.data.projects.length; i++) if (Store.data.projects[i].id === id) return Store.data.projects[i]; return null; }
@@ -235,25 +254,37 @@
   }
 
   /* ---------- 路由 ---------- */
+  var _hist = [], _hi = -1;
   var Router = {
     view: "dashboard",
     params: {},
-    go: function (view, params) {
+    go: function (view, params, noPush) {
       this.view = view; this.params = params || {};
+      // 记录导航历史（用于前进后退）
+      if (!noPush) { _hist = _hist.slice(0, _hi + 1); _hist.push({ view: view, params: params }); _hi++; }
       Array.prototype.forEach.call(el("nav").querySelectorAll(".nav-item"), function (a) {
         a.classList.toggle("active", a.dataset.view === view || (view === "projectDetail" && a.dataset.view === "projects"));
       });
       var titles = {
         dashboard: "概览仪表盘", projects: "项目管理", projectDetail: "项目详情",
         attendance: "人员考勤", monthly: "月度执行情况",
-        personnel: "人员台账", achievements: "成果管理", io: "数据导入导出"
+        personnel: "人员台账", achievements: "成果管理", io: "数据导入导出",
+        funds: "经费管理", contacts: "创新小组联系人"
       };
       el("viewTitle").textContent = titles[view] || view;
+      // 更新前进后退按钮状态
+      var btnBack = el("navBack"); var btnFwd = el("navFwd");
+      if (btnBack) btnBack.disabled = !this.canGoBack();
+      if (btnFwd) btnFwd.disabled = !this.canGoForward();
       el("content").innerHTML = "";
       var node = VIEWS[view] ? VIEWS[view](this.params) : h("div", { class: "empty" }, "未知视图");
       el("content").appendChild(node);
       var sb = el("sidebar"); if (sb) sb.classList.remove("open");
-    }
+    },
+    back: function () { if (_hi > 0) { _hi--; var s = _hist[_hi]; Router.go(s.view, s.params, true); } },
+    fwd: function () { if (_hi < _hist.length - 1) { _hi++; var s = _hist[_hi]; Router.go(s.view, s.params, true); } },
+    canGoBack: function () { return _hi > 0; },
+    canGoForward: function () { return _hi < _hist.length - 1; }
   };
 
   /* ============================================================
@@ -278,7 +309,6 @@
       statCard("项目总数", nProj + " 个", "在研科研项目", "📁"),
       statCard("研发人员", nPeople + " 人", "本月参与人数", "👥"),
       statCard("本月研发工时", fmt(rdTotal, 1) + " 天", "所有项目合计", "⏱️"),
-      statCard("本月人员费用估算", fmt(costTotal, 2) + " 元", "按工时×日单价估算", "💰"),
       statCard("本月归集经费", fmt(fundsTotal, 2) + " 元", "已填报月度经费", "📈"),
       statCard("知识产权成果", (Store.data.achievements ? Store.data.achievements.length : 0) + " 项", "论文/专利/报告等", "📜")
     ]));
@@ -446,7 +476,6 @@
     var cost = projectPersonCost(p.id, m);
     root.appendChild(h("div", { class: "stat-grid" }, [
       statCard("本月研发工时", fmt(rd, 1) + " 天", "项目人员合计"),
-      statCard("人员费用估算", fmt(cost, 2) + " 元", "工时×日单价(" + (Store.data.settings.dailyRate || 0) + "元/天)"),
       statCard("本月归集经费", fmt(r.monthlyFunds || 0, 2) + " 元", "已填报"),
       statCard("累计归集经费", fmt(cumulativeFundsUpto(p.id, m) || 0, 2) + " 元", "截至本月")
     ]));
@@ -458,6 +487,14 @@
     rb.appendChild(block("本月完成工作（含成果产出）", r.completedWork));
     rb.appendChild(block("存在问题", r.problems));
     rb.appendChild(block("下步计划", r.nextPlan));
+    var achCount = (Store.data.achievements || []).filter(function(a) { return a.projectId === p.id; }).length;
+    rb.appendChild(block("指标完成情况（知识产权）", achCount + " 项成果"));
+    // 自动检测问题说明
+    var issues = [];
+    if (!r.completedWork || !r.completedWork.trim()) issues.push("完成工作未填写");
+    if (!r.monthlyFunds || Number(r.monthlyFunds) === 0) issues.push("本月经费未归集");
+    if (achCount === 0) issues.push("知识产权无进展");
+    rb.appendChild(block("问题说明", issues.length ? issues.join("；") : "正常"));
     root.appendChild(h("div", { style: "margin-top:16px" }, rep));
 
     // 项目相关成果
@@ -515,15 +552,23 @@
       var hcb = hc.querySelector(".card-body");
       var hw = h("div", { class: "table-wrap" });
       var ht = h("table", { class: "tbl" });
-      ht.innerHTML = "<thead><tr><th>月份</th><th>完成工作</th><th>存在问题</th><th>下步计划</th><th class='num'>本月经费/元</th><th class='num'>累计经费/元</th><th>操作</th></tr></thead>";
+      ht.innerHTML = "<thead><tr><th>月份</th><th>完成工作</th><th>存在问题</th><th>下步计划</th><th>指标完成情况</th><th>问题说明</th><th class='num'>本月经费/元</th><th class='num'>累计经费/元</th><th>操作</th></tr></thead>";
       var htb = h("tbody");
       months.forEach(function (mk) {
         var rr = p.monthlyReports[mk];
+        var histAchCount = (Store.data.achievements || []).filter(function(a) { return a.projectId === p.id; }).length;
+        var histIssues = [];
+        if (!rr.completedWork || !rr.completedWork.trim()) histIssues.push("完成工作未填写");
+        if (!rr.monthlyFunds || Number(rr.monthlyFunds) === 0) histIssues.push("本月经费未归集");
+        if (histAchCount === 0) histIssues.push("知识产权无进展");
+        var histIssueStr = histIssues.length ? histIssues.join("；") : "正常";
         htb.appendChild(h("tr", {}, [
           h("td", {}, mk),
           h("td", { class: "wrap" }, esc(rr.completedWork || "").slice(0, 40) || "—"),
           h("td", { class: "wrap" }, esc(rr.problems || "").slice(0, 40) || "—"),
           h("td", { class: "wrap" }, esc(rr.nextPlan || "").slice(0, 40) || "—"),
+          h("td", {}, histAchCount + " 项"),
+          h("td", { class: "wrap" }, histIssueStr),
           h("td", { class: "num" }, fmt(rr.monthlyFunds || 0, 2)),
           h("td", { class: "num" }, fmt(rr.cumulativeFunds || 0, 2)),
           h("td", {}, h("button", { class: "btn btn-sm", onclick: function () { editMonthly(p.id, mk); } }, "编辑"))
@@ -874,41 +919,80 @@
       ]),
       h("div", { class: "right" }, [h("button", { class: "btn", onclick: function () { exportMonthly(m); } }, "导出月度执行情况"), h("button", { class: "btn btn-primary", onclick: function () { batchEditMonthly(m); } }, "批量编辑本月")])
     ]));
-    var totBudget = 0, totCost = 0, totFunds = 0, totCum = 0;
+    var totBudget = 0, totFunds = 0, totCum = 0;
     var wrap = h("div", { class: "table-wrap" });
     var tbl = h("table", { class: "tbl" });
-    tbl.innerHTML = "<thead><tr><th>项目名称</th><th>负责人</th><th class='num'>总预算/元</th><th class='num'>人员费用估算/元</th><th class='num'>本月归集经费/元</th><th class='num'>累计归集经费/元</th><th>本月完成工作</th><th>存在问题</th><th>下步计划</th><th>操作</th></tr></thead>";
+    tbl.innerHTML = "<thead><tr><th>项目名称</th><th>起止周期</th><th>负责人</th><th class='num'>总预算/元</th><th class='num'>本月归集经费/元</th><th class='num'>累计归集经费/元</th><th>指标完成情况（知识产权）</th><th>本月完成工作</th><th>存在问题</th><th>下步计划</th><th>问题说明</th><th>操作</th></tr></thead>";
     var tb = h("tbody");
     Store.data.projects.forEach(function (p) {
       var r = ensureMonth(p, m);
       var cost = projectPersonCost(p.id, m);
       var cum = r.cumulativeFunds ? Number(r.cumulativeFunds) : cumulativeFundsUpto(p.id, m);
-      totBudget += Number(p.totalBudget) || 0; totCost += cost; totFunds += Number(r.monthlyFunds) || 0; totCum += cum;
+      totBudget += Number(p.totalBudget) || 0; totFunds += Number(r.monthlyFunds) || 0; totCum += cum;
+      // 计算指标完成情况（知识产权）：p.targets 要求数量 vs 成果管理实际数量
+      var tkeys = p.targets ? Object.keys(p.targets).filter(function (t) { return Number(p.targets[t]) > 0; }) : [];
+      var achCell;
+      if (tkeys.length) {
+        achCell = h("td", { class: "wrap", style: "max-width:170px;font-size:12px" });
+        tkeys.forEach(function (t, i) {
+          var req = Number(p.targets[t]) || 0;
+          var act = countAchievements(p.id, t);
+          var span = h("span", {}, t + " " + act + "/" + req);
+          if (act >= req) { span.style.color = "#1e8e3e"; span.style.fontWeight = "600"; }
+          achCell.appendChild(span);
+          if (i < tkeys.length - 1) achCell.appendChild(document.createTextNode("，"));
+        });
+      } else achCell = h("td", {}, "—");
+
+      // 自动检测问题说明
+      var issues = [];
+      var cwEmpty = !r.completedWork || !String(r.completedWork).trim();
+      var mf = Number(r.monthlyFunds) || 0;
+      if (cwEmpty) issues.push("本月完成工作未填报");
+      if (!r.monthlyFunds || mf === 0) issues.push("本月归集经费未填报");
+      if (p.totalBudget && cum > Number(p.totalBudget) * 10000) issues.push("累计经费超预算");
+      if (mf > 0 && cwEmpty) issues.push("有经费无工作进度");
+      var ppl = peopleInProject(p.id);
+      if (!ppl.length) issues.push("未关联人员");
+      var crossNames = {};
+      ppl.forEach(function (pe) {
+        if (crossNames[pe.name]) return;
+        var cross = Store.data.personnel.some(function (o) { return o.name === pe.name && o.projectId !== p.id; });
+        if (cross) { crossNames[pe.name] = true; issues.push(pe.name + "跨多个项目"); }
+      });
+      if (tkeys.length) {
+        var projAch = (Store.data.achievements || []).filter(function (a) { return a.projectId === p.id; });
+        if (!projAch.length) issues.push("知识产权无成果记录");
+        else if (!projAch.some(function (a) { return a.date && String(a.date).slice(0, 7) === m; })) issues.push("本月无新增成果");
+      }
+      var issueStr = issues.length ? issues.join("；") : "正常";
+
       tb.appendChild(h("tr", {}, [
         h("td", { class: "wrap" }, p.name),
+        h("td", { style: "font-size:12px;white-space:nowrap" }, (p.periodStart || "—") + " ~ " + (p.periodEnd || "—")),
         h("td", {}, p.leader || "—"),
         h("td", { class: "num" }, p.totalBudget ? fmt(Number(p.totalBudget) * 10000, 2) : "—"),
-        h("td", { class: "num" }, fmt(cost, 2)),
         h("td", { class: "num" }, fmt(r.monthlyFunds || 0, 2)),
         h("td", { class: "num" }, fmt(cum, 2)),
+        achCell,
         h("td", { class: "wrap", style: "max-width:200px" }, esc(r.completedWork || "").slice(0, 50) || "—"),
         h("td", { class: "wrap", style: "max-width:200px" }, esc(r.problems || "").slice(0, 50) || "—"),
         h("td", { class: "wrap", style: "max-width:200px" }, esc(r.nextPlan || "").slice(0, 50) || "—"),
+        h("td", { class: "wrap", style: "max-width:160px;font-size:12px" }, issueStr),
         h("td", {}, [h("button", { class: "btn btn-sm", onclick: function () { editMonthly(p.id, m); } }, "填报"), h("button", { class: "btn btn-sm", onclick: function () {
           r.monthlyFunds = fmt(cost, 2); Store.save(); Router.go("monthly"); toast("已用估算值填充本月经费", "ok");
         } }, "用估算填充")])
       ]));
     });
     tb.appendChild(h("tr", { style: "font-weight:600;background:#eef3fa" }, [
-      h("td", {}, "合计"), h("td", {}, "—"),
+      h("td", {}, "合计"), h("td", {}, "—"), h("td", {}, "—"),
       h("td", { class: "num" }, fmt(totBudget * 10000, 2)),
-      h("td", { class: "num" }, fmt(totCost, 2)),
       h("td", { class: "num" }, fmt(totFunds, 2)),
       h("td", { class: "num" }, fmt(totCum, 2)),
-      h("td", { colspan: 4 }, "")
+      h("td", { colspan: 6 }, "")
     ]));
     tbl.appendChild(tb); wrap.appendChild(tbl); root.appendChild(wrap);
-    root.appendChild(h("div", { class: "text-muted", style: "margin-top:8px;font-size:12px" }, "说明：总预算=万元×10000转为元；人员费用估算=研发工时×日单价（元）；本月/累计归集经费单位均为元。"));
+    root.appendChild(h("div", { class: "text-muted", style: "margin-top:8px;font-size:12px" }, "说明：总预算=万元×10000转为元；本月/累计归集经费单位均为元；「指标完成情况」=成果管理实际数/考核指标要求数（绿色加粗为已达标）；「问题说明」为系统自动检测生成。"));
     return root;
   };
   function editMonthly(pid, m) {
@@ -921,11 +1005,13 @@
     form.appendChild(h("div", { class: "field" }, [h("label", {}, "月份"), h("div", { class: "text-muted" }, m)]));
     var grid = h("div", { class: "form-grid" });
     grid.appendChild(field("研发工时（天）", h("div", { class: "text-muted" }, fmt(rd, 1))));
-    grid.appendChild(field("人员费用估算（元）", h("div", { class: "text-muted" }, fmt(cost, 2))));
     form.appendChild(grid);
     form.appendChild(h("div", { class: "field field-full" }, [h("label", {}, "本月完成工作（含成果产出）"), h("textarea", { id: "f_cw", style: "width:100%;min-height:80px" }, r.completedWork || "")]));
     form.appendChild(h("div", { class: "field field-full" }, [h("label", {}, "存在问题"), h("textarea", { id: "f_pb", style: "width:100%;min-height:60px" }, r.problems || "")]));
     form.appendChild(h("div", { class: "field field-full" }, [h("label", {}, "下步计划"), h("textarea", { id: "f_np", style: "width:100%;min-height:60px" }, r.nextPlan || "")]));
+    // 指标完成情况
+    var achCount = (Store.data.achievements || []).filter(function(a) { return a.projectId === p.id; }).length;
+    form.appendChild(h("div", { class: "field field-full" }, [h("label", {}, "指标完成情况（知识产权）"), h("div", { class: "text-muted" }, achCount + " 项成果（论文/专利/报告等），详见成果管理模块")]));
     var grid2 = h("div", { class: "form-grid" });
     grid2.appendChild(field("本月归集经费（元）", h("input", { id: "f_mf", value: r.monthlyFunds || "", type: "number", step: "0.01", style: "width:100%" })));
     grid2.appendChild(field("累计归集经费（元）", h("input", { id: "f_cf", value: r.cumulativeFunds || "", type: "number", step: "0.01", style: "width:100%" })));
@@ -952,7 +1038,6 @@
       var fb = fieldset.querySelector(".card-body");
       fb.appendChild(h("div", { class: "section-title" }, p.name));
       fb.appendChild(h("div", { class: "form-grid" }, [
-        h("div", { class: "field" }, [h("label", {}, "人员费用估算/元"), h("div", { class: "text-muted" }, fmt(cost, 2))]),
         h("div", { class: "field" }, [h("label", {}, "本月归集经费/元"), h("input", { id: "mf_" + p.id, value: r.monthlyFunds || "", type: "number", step: "0.01", style: "width:100%" })])
       ]));
       fb.appendChild(h("div", { class: "form-grid" }, [
@@ -961,6 +1046,8 @@
       fb.appendChild(field("本月完成工作", h("textarea", { id: "cw_" + p.id, style: "width:100%;min-height:50px" }, r.completedWork || "")));
       fb.appendChild(field("存在问题", h("textarea", { id: "pb_" + p.id, style: "width:100%;min-height:40px" }, r.problems || "")));
       fb.appendChild(field("下步计划", h("textarea", { id: "np_" + p.id, style: "width:100%;min-height:40px" }, r.nextPlan || "")));
+      var achCount = (Store.data.achievements || []).filter(function(a) { return a.projectId === p.id; }).length;
+      fb.appendChild(field("指标完成情况（知识产权）", h("div", { class: "text-muted" }, achCount + " 项成果")));
       form.appendChild(fieldset);
     });
     openModal("批量编辑 " + m + " 月度执行情况", form, { wide: true, foot: [
@@ -976,22 +1063,22 @@
     ] });
   }
   function exportMonthly(m) {
-    var rows = [["中咨养护检测 - 月度执行情况表"], ["月份：" + m + "    单位：元"], ["项目名称", "起止周期", "负责人", "总预算/元", "人员费用估算/元", "本月归集经费/元", "累计归集经费/元", "本月完成工作", "存在问题", "下步计划"]];
+    var rows = [["中咨养护检测 - 月度执行情况表"], ["月份：" + m + "    单位：元"], ["项目名称", "起止周期", "负责人", "总预算/元", "本月归集经费/元", "累计归集经费/元", "指标完成情况（知识产权）", "本月完成工作", "存在问题", "下步计划"]];
     Store.data.projects.forEach(function (p) {
       var r = ensureMonth(p, m);
-      var cost = projectPersonCost(p.id, m);
       var cum = r.cumulativeFunds ? Number(r.cumulativeFunds) : cumulativeFundsUpto(p.id, m);
-      rows.push([p.name, (p.periodStart || "") + "-" + (p.periodEnd || ""), p.leader || "", p.totalBudget ? (Number(p.totalBudget) * 10000).toFixed(2) : "", cost.toFixed(2), r.monthlyFunds || "", cum.toFixed(2), r.completedWork || "", r.problems || "", r.nextPlan || ""]);
+      var tkeys = p.targets ? Object.keys(p.targets).filter(function (t) { return Number(p.targets[t]) > 0; }) : [];
+      var achStr = tkeys.length ? tkeys.map(function (t) { return t + " " + countAchievements(p.id, t) + "/" + (Number(p.targets[t]) || 0); }).join("，") : "—";
+      rows.push([p.name, (p.periodStart || "") + "~" + (p.periodEnd || ""), p.leader || "", p.totalBudget ? (Number(p.totalBudget) * 10000).toFixed(2) : "", r.monthlyFunds || "", cum.toFixed(2), achStr, r.completedWork || "", r.problems || "", r.nextPlan || ""]);
     });
     // 合计行
     var totB = Store.data.projects.reduce(function (s, p) { return s + (Number(p.totalBudget) || 0); }, 0) * 10000;
-    var totC = Store.data.projects.reduce(function (s, p) { return s + projectPersonCost(p.id, m); }, 0);
     var totF = Store.data.projects.reduce(function (s, p) { return s + (Number(ensureMonth(p, m).monthlyFunds) || 0); }, 0);
     var totCum = Store.data.projects.reduce(function (s, p) { var r = ensureMonth(p, m); return s + (r.cumulativeFunds ? Number(r.cumulativeFunds) : cumulativeFundsUpto(p.id, m)); }, 0);
-    rows.push(["合计", "", "", totB.toFixed(2), totC.toFixed(2), totF.toFixed(2), totCum.toFixed(2), "", "", ""]);
+    rows.push(["合计", "", "", totB.toFixed(2), totF.toFixed(2), totCum.toFixed(2), "", "", "", ""]);
     var ws = XLSX.utils.aoa_to_sheet(rows);
     ws["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 9 } }, { s: { r: 1, c: 0 }, e: { r: 1, c: 9 } }];
-    ws["!cols"] = [{ wch: 24 }, { wch: 14 }, { wch: 10 }, { wch: 14 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 30 }, { wch: 30 }, { wch: 30 }];
+    ws["!cols"] = [{ wch: 24 }, { wch: 18 }, { wch: 10 }, { wch: 14 }, { wch: 16 }, { wch: 16 }, { wch: 24 }, { wch: 30 }, { wch: 30 }, { wch: 30 }];
     var wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, m + "月度执行");
     download("月度执行情况-" + m + ".xlsx", wb);
@@ -1354,6 +1441,262 @@
     ] });
   }
 
+  /* ---- 经费管理 ---- */
+  // 叶子科目（可编辑）；equipment 父行=3子项之和；_direct/_total 为自动计算行
+  var FUND_LEAVES = ["research", "equipmentPurchase", "equipmentTrial", "equipmentLease", "material", "testing", "fuel", "travel", "publishing", "labor", "expert", "other", "indirect"];
+  var FUND_DIRECT = ["research", "equipment", "material", "testing", "fuel", "travel", "publishing", "labor", "expert", "other"];
+  var FUND_ROWS = [
+    { key: "research", name: "研究人员费" },
+    { key: "equipment", name: "设备费", auto: "equip" },
+    { key: "equipmentPurchase", name: "其中：设备购置费", sub: true },
+    { key: "equipmentTrial", name: "设备试制费", sub: true },
+    { key: "equipmentLease", name: "设备改造与租赁费", sub: true },
+    { key: "material", name: "材料费" },
+    { key: "testing", name: "测试化验加工费" },
+    { key: "fuel", name: "燃料动力费" },
+    { key: "travel", name: "差旅/会议/国际合作交流费" },
+    { key: "publishing", name: "出版/文献/信息传播/知识产权事务费" },
+    { key: "labor", name: "劳务费" },
+    { key: "expert", name: "专家咨询费" },
+    { key: "other", name: "其他支出" },
+    { key: "_direct", name: "直接费用小计", auto: "direct" },
+    { key: "indirect", name: "间接费用" },
+    { key: "_total", name: "合计", auto: "total" }
+  ];
+  // 预算初始值（单位：万元，按项目名称关键词匹配，仅在该 projectId 无记录时初始化）
+  var FUND_SEEDS = [
+    { kw: "桥梁集群智慧感知", b: { research: 365, material: 150, testing: 50, fuel: 5, travel: 50, publishing: 30, labor: 0, expert: 30, other: 140, indirect: 145 } },
+    { kw: "岩土结构", b: {} },
+    { kw: "薄层罩面", b: { research: 360, equipmentPurchase: 30, material: 280, testing: 30, fuel: 20, travel: 30, publishing: 5, labor: 30, expert: 30, other: 5, indirect: 80 } },
+    { kw: "跨尺度", b: { research: 320, equipmentPurchase: 100, equipmentTrial: 10, equipmentLease: 20, material: 30, testing: 55, fuel: 10, travel: 10, publishing: 50, labor: 50, expert: 20, other: 100, indirect: 135 } },
+    { kw: "公路路桥多维", b: { research: 663, equipmentLease: 214, other: 73 } },
+    { kw: "极端环境", b: { research: 500, travel: 230, publishing: 20, labor: 30, expert: 20, other: 100 } }
+  ];
+  function ensureFundBudget(pid) {
+    if (!Store.data.fundBudgets) Store.data.fundBudgets = {};
+    if (!Store.data.fundBudgets[pid]) {
+      var p = projectById(pid);
+      var b = {};
+      FUND_LEAVES.forEach(function (k) { b[k] = 0; });
+      if (p) for (var i = 0; i < FUND_SEEDS.length; i++) {
+        if (p.name.indexOf(FUND_SEEDS[i].kw) >= 0) {
+          for (var k in FUND_SEEDS[i].b) b[k] = FUND_SEEDS[i].b[k];
+          break;
+        }
+      }
+      b.equipment = (Number(b.equipmentPurchase) || 0) + (Number(b.equipmentTrial) || 0) + (Number(b.equipmentLease) || 0);
+      Store.data.fundBudgets[pid] = b;
+    }
+    return Store.data.fundBudgets[pid];
+  }
+  function fundMonthVal(pid, year, mon, key) {
+    if (!Store.data.fundRecords) return 0;
+    var rec = Store.data.fundRecords[pid + "|" + year + "-" + ("0" + mon).slice(-2)];
+    if (!rec) return 0;
+    if (key === "equipment") return (Number(rec.equipmentPurchase) || 0) + (Number(rec.equipmentTrial) || 0) + (Number(rec.equipmentLease) || 0);
+    return Number(rec[key]) || 0;
+  }
+  function fundRowMonthVal(pid, year, mon, row) {
+    if (row.auto === "direct") { var s = 0; FUND_DIRECT.forEach(function (k) { s += fundMonthVal(pid, year, mon, k); }); return s; }
+    if (row.auto === "total") return fundRowMonthVal(pid, year, mon, { auto: "direct" }) + fundMonthVal(pid, year, mon, "indirect");
+    return fundMonthVal(pid, year, mon, row.key);
+  }
+  function fundRowBudget(bs, row) {
+    if (row.auto === "direct") { var s = 0; FUND_DIRECT.forEach(function (k) { s += Number(bs[k]) || 0; }); return s; }
+    if (row.auto === "total") return fundRowBudget(bs, { auto: "direct" }) + (Number(bs.indirect) || 0);
+    if (row.key === "equipment") return (Number(bs.equipmentPurchase) || 0) + (Number(bs.equipmentTrial) || 0) + (Number(bs.equipmentLease) || 0);
+    return Number(bs[row.key]) || 0;
+  }
+
+  VIEWS.funds = function (params) {
+    params = params || {};
+    var projects = Store.data.projects;
+    var root = h("div");
+    if (!projects.length) { root.appendChild(h("div", { class: "empty" }, "暂无项目，请先在「项目管理」中添加")); return root; }
+    var pid = (params.pid && projectById(params.pid)) ? params.pid : projects[0].id;
+    var year = Number(params.year) || Number(Store.data.settings.currentMonth.split("-")[0]);
+    var p = projectById(pid);
+    var bs = ensureFundBudget(pid);
+
+    root.appendChild(h("div", { class: "toolbar" }, [
+      h("div", { class: "left" }, [
+        h("div", { class: "filter" }, [h("span", {}, "项目"), (function () {
+          var s = h("select", { onchange: function (e) { Router.go("funds", { pid: e.target.value, year: year }); } });
+          projects.forEach(function (pr) { var o = h("option", { value: pr.id }, pr.name); if (pr.id === pid) o.selected = true; s.appendChild(o); });
+          return s;
+        })()]),
+        h("div", { class: "filter" }, [h("span", {}, "年度"), h("input", { type: "number", value: year, style: "width:90px", onchange: function (e) { Router.go("funds", { pid: pid, year: Number(e.target.value) || year }); } })]),
+        h("span", { style: "color:#c0392b;font-size:13px;font-weight:600;margin-left:10px" }, "修改后请点击保存")
+      ]),
+      h("div", { class: "right" }, [
+        h("button", { class: "btn", onclick: function () { editFundBudget(pid, year); } }, "预算设置"),
+        h("button", { class: "btn btn-primary", onclick: function () { Store.save(); toast("已保存", "ok"); } }, "保存")
+      ])
+    ]));
+
+    var wrap = h("div", { class: "table-wrap" });
+    var tbl = h("table", { class: "tbl" });
+    var head = "<thead><tr><th>预算科目</th><th class='num'>预算金额(万元)</th>";
+    for (var mi = 1; mi <= 12; mi++) head += "<th class='num'>" + mi + "月(元)</th>";
+    head += "<th class='num'>年度合计(元)</th><th class='num'>占预算比例%</th></tr></thead>";
+    tbl.innerHTML = head;
+    var tb = h("tbody");
+    FUND_ROWS.forEach(function (row) {
+      var isAuto = !!row.auto;
+      var budget = fundRowBudget(bs, row);
+      var cells = [h("td", row.sub ? { style: "padding-left:22px" } : {}, row.name)];
+      cells.push(h("td", { class: "num" }, fmt(budget, 2)));
+      var yearSum = 0;
+      for (var mo = 1; mo <= 12; mo++) {
+        (function (mon) {
+          var v = fundRowMonthVal(pid, year, mon, row);
+          yearSum += v;
+          if (isAuto) { cells.push(h("td", { class: "num" }, v ? fmt(v, 2) : "")); return; }
+          var ym = year + "-" + ("0" + mon).slice(-2);
+          cells.push(h("td", { class: "num" }, h("input", {
+            type: "number", step: "0.01", value: v || "", style: "width:78px;text-align:right",
+            onchange: function (e) {
+              if (!Store.data.fundRecords) Store.data.fundRecords = {};
+              var k = pid + "|" + ym;
+              if (!Store.data.fundRecords[k]) Store.data.fundRecords[k] = {};
+              Store.data.fundRecords[k][row.key] = Number(e.target.value) || 0;
+              Router.go("funds", { pid: pid, year: year }, true);
+            }
+          })));
+        })(mo);
+      }
+      cells.push(h("td", { class: "num" }, fmt(yearSum, 2)));
+      cells.push(h("td", { class: "num" }, budget > 0 ? (yearSum / (budget * 10000) * 100).toFixed(1) + "%" : "—"));
+      tb.appendChild(h("tr", isAuto ? { style: "font-weight:600;background:#eef3fa" } : {}, cells));
+    });
+    tbl.appendChild(tb); wrap.appendChild(tbl); root.appendChild(wrap);
+
+    root.appendChild(h("div", { style: "margin-top:10px" }, [
+      h("button", { class: "btn", onclick: function () { exportFunds(p, bs, year); } }, "导出经费表")
+    ]));
+    root.appendChild(h("div", { class: "text-muted", style: "margin-top:8px;font-size:12px" }, "说明：预算金额单位为万元，各月归集金额单位为元；设备费=购置+试制+改造租赁之和；直接费用小计、合计为自动计算；占预算比例=年度合计÷(科目预算×10000)。月份单元格修改后请点击右上角「保存」按钮生效。"));
+    return root;
+  };
+
+  function editFundBudget(pid, year) {
+    var p = projectById(pid); if (!p) return;
+    var bs = ensureFundBudget(pid);
+    var form = h("div", {});
+    form.appendChild(h("div", { class: "section-title" }, p.name + "（单位：万元）"));
+    var grid = h("div", { class: "form-grid" });
+    FUND_ROWS.forEach(function (row) {
+      if (row.auto === "direct" || row.auto === "total") return;
+      if (row.key === "equipment") {
+        grid.appendChild(field(row.name, h("div", { class: "text-muted" }, "自动 = 3子项之和：" + fmt(fundRowBudget(bs, row), 2) + " 万元")));
+        return;
+      }
+      grid.appendChild(field(row.name, h("input", { type: "number", step: "0.01", min: "0", id: "fb_" + row.key, value: Number(bs[row.key]) || 0, style: "width:100%" })));
+    });
+    form.appendChild(grid);
+    openModal("预算设置", form, { wide: true, foot: [
+      { text: "取消", onclick: closeModal },
+      { text: "保存", kind: "btn-primary", onclick: function () {
+        FUND_LEAVES.forEach(function (k) { var inp = el("fb_" + k); if (inp) bs[k] = Number(inp.value) || 0; });
+        bs.equipment = (Number(bs.equipmentPurchase) || 0) + (Number(bs.equipmentTrial) || 0) + (Number(bs.equipmentLease) || 0);
+        Store.save(); closeModal(); Router.go("funds", { pid: pid, year: year }, true); toast("预算已保存", "ok");
+      } }
+    ] });
+  }
+
+  function exportFunds(p, bs, year) {
+    var head = ["预算科目", "预算金额(万元)"];
+    for (var mi = 1; mi <= 12; mi++) head.push(mi + "月(元)");
+    head.push("年度合计(元)", "占预算比例%");
+    var rows = [[p.name + " - " + year + "年度经费表"], head];
+    FUND_ROWS.forEach(function (row) {
+      var budget = fundRowBudget(bs, row);
+      var line = [row.name, budget.toFixed(2)];
+      var yearSum = 0;
+      for (var mon = 1; mon <= 12; mon++) { var v = fundRowMonthVal(p.id, year, mon, row); yearSum += v; line.push(v ? v.toFixed(2) : ""); }
+      line.push(yearSum.toFixed(2));
+      line.push(budget > 0 ? (yearSum / (budget * 10000) * 100).toFixed(1) + "%" : "—");
+      rows.push(line);
+    });
+    var ws = XLSX.utils.aoa_to_sheet(rows);
+    ws["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: head.length - 1 } }];
+    var cols = [{ wch: 30 }, { wch: 12 }];
+    for (var ci = 0; ci < 12; ci++) cols.push({ wch: 11 });
+    cols.push({ wch: 13 }, { wch: 11 });
+    ws["!cols"] = cols;
+    var wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, year + "年经费");
+    download("经费表-" + p.name.slice(0, 20) + "-" + year + ".xlsx", wb);
+    toast("已导出经费表", "ok");
+  }
+
+  /* ---- 创新小组联系人 ---- */
+  // 数据结构：Store.data.contacts = { cols:[列名...], rows:[[单元格...]...] }
+  function ensureContacts() {
+    if (!Store.data.contacts || !Store.data.contacts.cols) Store.data.contacts = defaultContacts();
+    return Store.data.contacts;
+  }
+
+  VIEWS.contacts = function () {
+    var data = ensureContacts();
+    var root = h("div");
+
+    root.appendChild(h("div", { class: "toolbar" }, [
+      h("div", { class: "left" }, h("div", { class: "section-title" }, "创新小组联系人")),
+      h("div", { class: "right" }, [
+        h("button", { class: "btn", onclick: function () {
+          var row = data.cols.map(function () { return ""; });
+          row[0] = String(data.rows.length + 1);
+          data.rows.push(row);
+          Router.go("contacts", {}, true);
+        } }, "添加行"),
+        h("button", { class: "btn", onclick: function () {
+          var name = prompt("请输入新列名称：");
+          if (!name || !name.trim()) return;
+          data.cols.push(name.trim());
+          data.rows.forEach(function (r) { r.push(""); });
+          Router.go("contacts", {}, true);
+        } }, "添加列"),
+        h("button", { class: "btn btn-primary", onclick: function () { Store.save(); toast("已保存", "ok"); } }, "保存")
+      ])
+    ]));
+
+    var wrap = h("div", { class: "table-wrap" });
+    var tbl = h("table", { class: "tbl" });
+    var trh = h("tr");
+    data.cols.forEach(function (col, ci) {
+      trh.appendChild(h("th", {}, h("div", { style: "display:flex;align-items:center;gap:4px" }, [
+        h("input", { value: col, style: "width:100%;min-width:70px;border:1px solid transparent;background:transparent;font-weight:600", onchange: function (e) { data.cols[ci] = e.target.value; } }),
+        h("button", { class: "btn btn-sm", title: "删除列", style: "padding:0 6px", onclick: function () {
+          confirmModal("删除列", "确认删除列「" + col + "」？该列所有单元格数据将一并删除。", function () {
+            data.cols.splice(ci, 1);
+            data.rows.forEach(function (r) { r.splice(ci, 1); });
+            Router.go("contacts", {}, true);
+          });
+        } }, "×")
+      ])));
+    });
+    trh.appendChild(h("th", {}, "操作"));
+    tbl.appendChild(h("thead", {}, trh));
+    var tb = h("tbody");
+    data.rows.forEach(function (row, ri) {
+      var tr = h("tr");
+      data.cols.forEach(function (col, ci) {
+        tr.appendChild(h("td", {}, h("input", { value: row[ci] || "", style: "width:100%;border:none;background:transparent", onchange: function (e) { row[ci] = e.target.value; } })));
+      });
+      tr.appendChild(h("td", {}, h("button", { class: "btn btn-sm btn-danger", onclick: function () {
+        confirmModal("删除行", "确认删除第 " + (ri + 1) + " 行？", function () {
+          data.rows.splice(ri, 1);
+          Router.go("contacts", {}, true);
+        });
+      } }, "删除")));
+      tb.appendChild(tr);
+    });
+    tbl.appendChild(tb); wrap.appendChild(tbl); root.appendChild(wrap);
+
+    root.appendChild(h("div", { class: "text-muted", style: "margin-top:8px;font-size:12px" }, "说明：修改单元格后请点击保存按钮生效。"));
+    return root;
+  };
+
   /* ---- 导入导出 ---- */
   VIEWS.io = function () {
     var root = h("div");
@@ -1607,6 +1950,9 @@
   function init() {
     Store.load();
     if (!Store.data.achievements) Store.data.achievements = [];
+    if (!Store.data.fundBudgets) Store.data.fundBudgets = {};
+    if (!Store.data.fundRecords) Store.data.fundRecords = {};
+    if (!Store.data.contacts || !Store.data.contacts.cols) Store.data.contacts = defaultContacts();
     if (!Store.data.settings.signatures) Store.data.settings.signatures = {};
     syncTopbar();
     // 从服务器同步最新共享数据，成功后刷新视图
@@ -1627,6 +1973,8 @@
     el("modalClose").addEventListener("click", closeModal);
     el("modalMask").addEventListener("click", function (e) { if (e.target === el("modalMask")) closeModal(); });
     el("menuToggle").addEventListener("click", function () { el("sidebar").classList.toggle("open"); });
+    el("navBack").addEventListener("click", Router.back);
+    el("navFwd").addEventListener("click", Router.fwd);
     document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeModal(); });
     Router.go("dashboard");
   }
